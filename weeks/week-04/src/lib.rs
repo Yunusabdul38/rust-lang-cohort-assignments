@@ -681,7 +681,12 @@ pub fn validate_all<T: Validate>(items: &[T]) -> Result<(), BtcLibError> {
     // 3. Return the first error immediately.
     // 4. Return `Ok(())` if every item is valid.
     for x in items {
-        x.validate().unwrap();
+        match x.validate() {
+            Ok(_) => {}
+            Err(eror) => {
+                return Err(eror);
+            }
+        };
     }
     Ok(())
 }
@@ -714,8 +719,15 @@ pub fn decode_hash_hex(input: &str) -> Result<[u8; 32], BtcLibError> {
             if x.len() != 32 {
                 Err(BtcLibError::InvalidHash)
             } else {
-                let k: [u8; 32] = x.as_slice().try_into().unwrap();
-                Ok(k)
+                let k = x.as_slice().try_into();
+                let mut value: [u8; 32] = [0; 32];
+                match k {
+                    Ok(m) => value = m,
+                    Err(_) => {
+                        return Err(BtcLibError::InvalidHash);
+                    }
+                }
+                Ok(value)
             }
         }
         Err(_) => Err(BtcLibError::InvalidHash),
