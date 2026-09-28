@@ -109,8 +109,6 @@ pub fn calculate_merkle_root(transactions: &[Transaction]) -> Result<String, Btc
                 &chunk[0]
             };
 
-            // Combine the pair. (Assuming a fictional `hash_pair` helper function,
-            // or you can concatenate them and run your SHA-256 function here).
             let parent_hash = pair_hash(left, right);
             next_level.push(parent_hash);
         }
