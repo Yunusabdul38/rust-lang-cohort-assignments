@@ -1,4 +1,4 @@
-use crate::{Block, BtcLibError, Transaction};
+use crate::{Block, BtcLibError, Transaction, TxStatus};
 
 pub trait Hashable {
     /// Return stable material that will be hashed.
@@ -24,7 +24,25 @@ impl Hashable for Transaction {
         // 3. Append `|outputs:`.
         // 4. Append every output as `<value_sats>:<recipient>:<status>;`.
         // 5. Return the final string.
-        todo!()
+        let txid = self.txid.clone();
+        let mut hash = format!("tx:{}|inputs:", txid);
+        for x in &self.inputs {
+            let input = format!("{}:{};", x.previous_txid, x.previous_vout);
+            hash.push_str(&input);
+        }
+        hash.push_str("|outputs:");
+        for x in &self.outputs {
+            let mut status = "";
+            if x.status == TxStatus::Spent {
+                status = "spent"
+            } else {
+                status = "unspent"
+            }
+            let input = format!("{}:{}:{};", x.value_sats, x.recipient, status);
+            hash.push_str(&input);
+        }
+
+        hash
     }
 }
 
@@ -38,7 +56,17 @@ impl Hashable for Block {
         // 1. Start with block hash, previous hash, merkle root, and height in the format above.
         // 2. Append each transaction id followed by `;`.
         // 3. Return the final string.
-        todo!()
+        let block_hash = self.header.block_hash.clone();
+        let mut hash = format!(
+            "block:{}|prev:{}:|merkle:{}|height:{}|",
+            block_hash, self.header.previous_block_hash, self.header.merkle_root, self.height
+        );
+        for x in &self.transactions {
+            let input = format!("txs:{};", x.txid,);
+            hash.push_str(&input);
+        }
+        hash.push_str(";");
+        hash
     }
 }
 
@@ -47,7 +75,8 @@ pub fn pair_hash(left: &str, right: &str) -> String {
     // Steps:
     // 1. Build the exact string `<left><right>` with no separator.
     // 2. Return `sha256::digest(joined_string)`.
-    todo!()
+    let joined_string = format!("{}{}", left, right);
+    sha256::digest(joined_string)
 }
 
 /// Calculate a simple merkle root from transaction hashes.
@@ -60,7 +89,37 @@ pub fn calculate_merkle_root(transactions: &[Transaction]) -> Result<String, Btc
     // 3. While more than one hash remains, pair hashes left-to-right.
     // 4. When a level has an odd count, pair the last hash with itself.
     // 5. Return the only remaining hash.
-    todo!()
+    if transactions.len() == 0 {
+        return Err(BtcLibError::EmptyBlock);
+    }
+    let mut current_level: Vec<String> = transactions.iter().map(|tx| tx.hash_hex()).collect();
+
+    // 3. While more than one hash remains, pair hashes left-to-right.
+    while current_level.len() > 1 {
+        let mut next_level = Vec::new();
+
+        // 4. Use .chunks(2) to safely grab pairs.
+        for chunk in current_level.chunks(2) {
+            let left = &chunk[0];
+
+            // If there's no right element (odd count), pair the last hash with itself.
+            let right = if chunk.len() == 2 {
+                &chunk[1]
+            } else {
+                &chunk[0]
+            };
+
+            // Combine the pair. (Assuming a fictional `hash_pair` helper function,
+            // or you can concatenate them and run your SHA-256 function here).
+            let parent_hash = pair_hash(left, right);
+            next_level.push(parent_hash);
+        }
+
+        current_level = next_level;
+    }
+
+    // 5. Return the only remaining hash.
+    Ok(current_level.remove(0))
 }
 
 /// Validate that the block header stores the merkle root for its transactions.
@@ -70,5 +129,16 @@ pub fn validate_merkle_root(block: &Block) -> Result<(), BtcLibError> {
     // 2. Compare it with `block.header.merkle_root`.
     // 3. Return `Ok(())` on an exact match.
     // 4. Return `Err(BtcLibError::InvalidMerkleRoot)` on mismatch.
-    todo!()
+    match calculate_merkle_root(&block.transactions) {
+        Ok(root) => {
+            if root == block.header.merkle_root {
+                return Ok(());
+            } else {
+                return Err(BtcLibError::InvalidMerkleRoot);
+            }
+        }
+        Err(err) => {
+            return Err(err);
+        }
+    }
 }
