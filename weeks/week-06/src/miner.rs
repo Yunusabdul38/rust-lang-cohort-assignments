@@ -1,3 +1,7 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
+use std::thread;
+
 use crate::{
     calculate_merkle_root, hash_candidate, hash_meets_difficulty, Block, BlockHeader,
     CandidateBlock, Mempool, MinerError, Transaction,
@@ -44,7 +48,22 @@ pub fn build_candidate_from_mempool(
     // 3. Put coinbase first, then drained transactions.
     // 4. Copy the previous hash and coinbase recipient into the candidate.
     // 5. Store reward, timestamp, and height unchanged.
-    todo!()
+    let coinbase = Transaction::coinbase(
+        &format!("coinbase-{}", height),
+        coinbase_recipient,
+        reward_sats,
+    );
+    let mut transactions = vec![coinbase];
+    transactions.extend(mempool.drain_for_candidate(max_mempool_txs));
+
+    CandidateBlock {
+        previous_block_hash: previous_block_hash.to_string(),
+        height,
+        transactions,
+        coinbase_recipient: coinbase_recipient.to_string(),
+        reward_sats,
+        timestamp,
+    }
 }
 
 /// Build a concrete block from a candidate and nonce.
@@ -59,7 +78,24 @@ pub fn build_candidate_block(
     // 3. Build a `BlockHeader` with candidate fields, nonce, and difficulty prefix.
     // 4. Move or clone the candidate transactions into a `Block`.
     // 5. Return the block.
-    todo!()
+    if candidate.transactions.is_empty() {
+        return Err(MinerError::EmptyCandidate);
+    }
+
+    let merkle_root = calculate_merkle_root(&candidate.transactions)?;
+    let header = BlockHeader {
+        previous_block_hash: candidate.previous_block_hash.clone(),
+        merkle_root,
+        timestamp: candidate.timestamp,
+        nonce,
+        difficulty_prefix: difficulty_prefix.to_string(),
+    };
+
+    Ok(Block {
+        header,
+        height: candidate.height,
+        transactions: candidate.transactions.clone(),
+    })
 }
 
 /// Split an inclusive nonce range across workers.
@@ -74,7 +110,25 @@ pub fn split_nonce_ranges(
     // 3. Split the range as evenly as possible.
     // 4. Give one extra nonce to earlier workers when the range does not divide evenly.
     // 5. Do not return empty ranges.
-    todo!()
+    if worker_count == 0 || start_nonce > max_nonce {
+        return Err(MinerError::InvalidDifficulty);
+    }
+
+    let total = (max_nonce - start_nonce) as u128 + 1;
+    let workers = (worker_count as u128).min(total);
+    let base = total / workers;
+    let extra = total % workers;
+
+    let mut ranges = Vec::with_capacity(workers as usize);
+    let mut next = start_nonce as u128;
+    for index in 0..workers {
+        let size = base + if index < extra { 1 } else { 0 };
+        let end = next + size - 1;
+        ranges.push((next as u64, end as u64));
+        next = end + 1;
+    }
+
+    Ok(ranges)
 }
 
 /// Search one inclusive nonce range.
@@ -91,7 +145,25 @@ pub fn mine_range(
     // 3. Count every attempted nonce.
     // 4. Return `Ok(Some(MinedNonce))` for the first hash that meets difficulty.
     // 5. Return `Ok(None)` if the range has no solution.
-    todo!()
+    if start_nonce > end_nonce {
+        return Err(MinerError::InvalidDifficulty);
+    }
+
+    let mut attempts = 0;
+    for nonce in start_nonce..=end_nonce {
+        let hash = hash_candidate(candidate, nonce)?;
+        attempts += 1;
+        if hash_meets_difficulty(&hash, difficulty_prefix)? {
+            return Ok(Some(MinedNonce {
+                nonce,
+                hash,
+                attempts,
+                worker_id,
+            }));
+        }
+    }
+
+    Ok(None)
 }
 
 /// Mine using a single worker over the configured nonce range.
@@ -104,7 +176,24 @@ pub fn mine_single_threaded(
     // 2. If a nonce is found, build the block with that nonce.
     // 3. Return a `MiningReport` with `worker_count` set to 1.
     // 4. Return `NoSolution` when the range has no valid nonce.
-    todo!()
+    let mined = mine_range(
+        candidate,
+        &config.difficulty_prefix,
+        config.start_nonce,
+        config.max_nonce,
+        0,
+    )?
+    .ok_or(MinerError::NoSolution)?;
+
+    let block = build_candidate_block(candidate, mined.nonce, &config.difficulty_prefix)?;
+
+    Ok(MiningReport {
+        block,
+        nonce: mined.nonce,
+        hash: mined.hash,
+        attempts: mined.attempts,
+        worker_count: 1,
+    })
 }
 
 /// Mine using several workers and return the first solution reported.
@@ -119,7 +208,78 @@ pub fn mine_multi_threaded(
     // 4. Use shared cancellation so workers can stop after a solution is found.
     // 5. Join worker threads before returning.
     // 6. Return `NoSolution` if no worker finds a nonce.
-    todo!()
+    hash_meets_difficulty("", &config.difficulty_prefix)?;
+    let ranges = split_nonce_ranges(config.start_nonce, config.max_nonce, config.worker_count)?;
+
+    let candidate = Arc::new(candidate);
+    let found = Arc::new(AtomicBool::new(false));
+    let (sender, receiver) = mpsc::channel::<Result<MinedNonce, MinerError>>();
+
+    let mut handles = Vec::with_capacity(ranges.len());
+    for (worker_id, (start, end)) in ranges.into_iter().enumerate() {
+        let candidate = Arc::clone(&candidate);
+        let found = Arc::clone(&found);
+        let sender = sender.clone();
+        let prefix = config.difficulty_prefix.clone();
+
+        handles.push(thread::spawn(move || {
+            let mut attempts = 0;
+            for nonce in start..=end {
+                if found.load(Ordering::Relaxed) {
+                    return;
+                }
+                let hash = match hash_candidate(&candidate, nonce) {
+                    Ok(hash) => hash,
+                    Err(error) => {
+                        let _ = sender.send(Err(error));
+                        return;
+                    }
+                };
+                attempts += 1;
+                match hash_meets_difficulty(&hash, &prefix) {
+                    Ok(true) => {
+                        found.store(true, Ordering::Relaxed);
+                        let _ = sender.send(Ok(MinedNonce {
+                            nonce,
+                            hash,
+                            attempts,
+                            worker_id,
+                        }));
+                        return;
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        let _ = sender.send(Err(error));
+                        return;
+                    }
+                }
+            }
+        }));
+    }
+    drop(sender);
+
+    let result = receiver.recv();
+    found.store(true, Ordering::Relaxed);
+
+    for handle in handles {
+        handle.join().map_err(|_| MinerError::ChannelClosed)?;
+    }
+
+    let mined = match result {
+        Ok(Ok(mined)) => mined,
+        Ok(Err(error)) => return Err(error),
+        Err(_) => return Err(MinerError::NoSolution),
+    };
+
+    let block = build_candidate_block(&candidate, mined.nonce, &config.difficulty_prefix)?;
+
+    Ok(MiningReport {
+        block,
+        nonce: mined.nonce,
+        hash: mined.hash,
+        attempts: mined.attempts,
+        worker_count: config.worker_count,
+    })
 }
 
 /// Build a compact mining progress line.
@@ -130,5 +290,8 @@ pub fn progress_line(report: &MiningReport) -> String {
     // Steps:
     // 1. Read fields from `report`.
     // 2. Return the exact format documented above.
-    todo!()
+    format!(
+        "workers:{}|nonce:{}|attempts:{}|hash:{}",
+        report.worker_count, report.nonce, report.attempts, report.hash
+    )
 }

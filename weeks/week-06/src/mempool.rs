@@ -1,6 +1,9 @@
 use std::collections::BTreeMap;
 
-use crate::{MinerError, Transaction};
+use crate::{
+    MinerError::{self, DuplicateMempoolTransaction, TransactionNotFound},
+    Transaction,
+};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Mempool {
@@ -13,7 +16,10 @@ impl Mempool {
         // Steps:
         // 1. Start with an empty `BTreeMap`.
         // 2. Return the mempool.
-        todo!()
+        let storage = BTreeMap::new();
+        Mempool {
+            transactions: storage,
+        }
     }
 
     /// Insert a transaction by txid.
@@ -21,8 +27,12 @@ impl Mempool {
         // Steps:
         // 1. Reject duplicate txids with `DuplicateMempoolTransaction(txid)`.
         // 2. Insert the transaction under its txid.
-        // 3. Return `Ok(())`.
-        todo!()
+        if self.transactions.contains_key(&transaction.txid) {
+            return Err(DuplicateMempoolTransaction(transaction.txid));
+        }
+        self.transactions
+            .insert(transaction.txid.clone(), transaction);
+        Ok(())
     }
 
     /// Remove and return one transaction.
@@ -31,7 +41,9 @@ impl Mempool {
         // 1. Remove the transaction with the matching txid.
         // 2. Return it when present.
         // 3. Return `TransactionNotFound(txid)` when missing.
-        todo!()
+        self.transactions
+            .remove(txid)
+            .ok_or_else(|| TransactionNotFound(txid.to_string()))
     }
 
     /// Return transactions in deterministic txid order without removing them.
@@ -40,7 +52,11 @@ impl Mempool {
         // 1. Iterate over the `BTreeMap` values.
         // 2. Clone each transaction into a vector.
         // 3. Return the vector.
-        todo!()
+        let mut new_storage = Vec::new();
+        for (_, x) in &self.transactions {
+            new_storage.push(x.clone());
+        }
+        new_storage
     }
 
     /// Drain up to `limit` transactions in deterministic txid order.
@@ -50,7 +66,15 @@ impl Mempool {
         // 2. Remove those transactions from the map.
         // 3. Return removed transactions in the same order.
         // 4. If `limit` is 0, return an empty vector.
-        todo!()
+        if limit == 0 {
+            return Vec::new();
+        }
+
+        let txids: Vec<String> = self.transactions.keys().take(limit).cloned().collect();
+        txids
+            .iter()
+            .filter_map(|txid| self.transactions.remove(txid))
+            .collect()
     }
 
     /// Return total output value across all transactions currently in the mempool.
@@ -59,6 +83,10 @@ impl Mempool {
         // 1. Iterate over all transactions.
         // 2. Add `transaction.total_output_value()`.
         // 3. Return the total.
-        todo!()
+        let mut total_output_value = 0;
+        for (_, x) in &self.transactions {
+            total_output_value += x.total_output_value();
+        }
+        total_output_value
     }
 }

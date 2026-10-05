@@ -136,7 +136,37 @@ impl Transaction {
         // 3. Return `MissingUtxo(label)` if any input is unknown.
         // 4. Sum input values and subtract output value.
         // 5. Return `InvalidSpend(txid)` if outputs exceed inputs.
-        todo!()
+        if self.is_coinbase() {
+            return Ok(0);
+        }
+
+        let mut total_inputs: u64 = 0;
+        for input in &self.inputs {
+            let outpoint = OutPoint {
+                txid: input.previous_txid.clone(),
+                vout: input.previous_vout,
+            };
+
+            match lookup(&outpoint) {
+                Some(value) => {
+                    total_inputs = total_inputs
+                        .checked_add(value)
+                        .ok_or(MinerError::InvalidSpend(self.txid.clone()))?;
+                }
+                None => {
+                    let label = format!("{}:{}", input.previous_txid, input.previous_vout);
+                    return Err(MinerError::MissingUtxo(label));
+                }
+            }
+        }
+
+        let total_outputs: u64 = self.outputs.iter().map(|out| out.value_sats).sum();
+
+        if total_outputs > total_inputs {
+            return Err(MinerError::InvalidSpend(self.txid.clone()));
+        }
+
+        Ok(total_inputs - total_outputs)
     }
 }
 
@@ -152,7 +182,18 @@ impl Hashable for Transaction {
         // 3. Append `|outputs:`.
         // 4. Append each output as `<value_sats>:<recipient>;`.
         // 5. Return the final string.
-        todo!()
+        let mut material = format!("tx:{}|inputs:", self.txid);
+
+        for input in &self.inputs {
+            material.push_str(&format!("{}:{};", input.previous_txid, input.previous_vout));
+        }
+
+        material.push_str("|outputs:");
+
+        for output in &self.outputs {
+            material.push_str(&format!("{}:{};", output.value_sats, output.recipient));
+        }
+        material
     }
 }
 
@@ -166,6 +207,22 @@ impl Hashable for Block {
         // 1. Start with previous hash, height, merkle root, timestamp, and nonce.
         // 2. Append every transaction id followed by `;`.
         // 3. Return the final string.
-        todo!()
+        let mut material = format!(
+            "block:{}|height:{}|merkle:{}|time:{}|nonce:{}|txs:",
+            self.header.previous_block_hash,
+            self.height,
+            self.header.merkle_root,
+            self.header.timestamp,
+            self.header.nonce
+        );
+
+        // 2. Append every transaction id followed by `;`.
+        for tx in &self.transactions {
+            material.push_str(&tx.txid);
+            material.push(';');
+        }
+
+        // 3. Return the final string.
+        material
     }
 }
